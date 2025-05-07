@@ -1,3 +1,5 @@
+import json
+from pyexpat.errors import messages
 from django.http import HttpResponse
 from django.shortcuts import redirect, render
 
@@ -18,7 +20,7 @@ from django.db.models import Q
 import bcrypt
 
 from rest_framework.permissions import IsAuthenticated
-from django.contrib.auth.decorators import login_required
+import requests
 
 
 class RegisterView(generics.CreateAPIView):
@@ -62,53 +64,127 @@ class ProfileView(APIView):
             "email": user.email,
         })
         
-# HTML view for user registration
+# HTML views for user 
 def register_page(request):
     if request.method == 'POST':
-        username = request.POST.get('username')
-        email = request.POST.get('email')
-        raw_password = request.POST.get('password')
-
-        hashed_pw = bcrypt.hashpw(raw_password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
-        User.objects.create(username=username, email=email, password=hashed_pw)
-        print("Welcome you have registerd succesfuly!")
-        return redirect('login_page')
-
+        # Prepare data to send to API
+        data = {
+            'username': request.POST.get('username'),
+            'email': request.POST.get('email'),
+            'password': request.POST.get('password'),
+            #'password2': request.POST.get('password2'),
+        }
+        
+        try:
+            # Make request to your API endpoint
+            response = requests.post(
+                'http://localhost:8000/api/register/', 
+                data=data
+            )
+            
+            if response.status_code == 201:
+                print("Registration successful!")
+                return redirect('/login/')
+            else:
+                # Pass API errors to template
+                errors = response.json()
+                return render(request, 'accounts/register.html', {'errors': errors})
+                
+        except requests.exceptions.RequestException:
+            messages.error(request, 'Could not connect to the server')
+            return render(request, 'accounts/register.html')
+    
     return render(request, 'accounts/register.html')
 
 
 # HTML view for login
 def login_page(request):
     if request.method == 'POST':
-        login_input = request.POST.get('username_or_email')
-        password = request.POST.get('password')
-
+        # Prepare data to send to API
+        data = {
+            'username_or_email': request.POST.get('username_or_email'),
+            'password': request.POST.get('password'),
+        }
+        
         try:
-            user = User.objects.get(Q(username=login_input) | Q(email=login_input))
-        except User.DoesNotExist:
-            return HttpResponse("Invalid username or email", status=401)
-
-        if bcrypt.checkpw(password.encode('utf-8'), user.password.encode('utf-8')):
-            refresh = RefreshToken.for_user(user)
-            response = redirect('profile_page')
-            response.set_cookie('access_token', str(refresh.access_token))  # Optional
-            return response
-        return HttpResponse("Incorrect password", status=401)
-
+            # Make request to your API endpoint
+            response = requests.post(
+                'http://localhost:8000/api/login/', 
+                data=json.dumps(data),
+                headers={'Content-Type': 'application/json'}
+            )
+            
+            if response.status_code == 200:
+                # Successful login - store tokens
+                response_data = response.json()
+                request.session['access_token'] = response_data['access']
+                request.session['refresh_token'] = response_data['refresh']
+                print('Login successful!')
+                return redirect('profile_page')
+            else:
+                # Pass API errors to template
+                errors = response.json()
+                return render(request, 'accounts/login.html', {'errors': errors})
+                
+        except requests.exceptions.RequestException:
+            messages.error(request, 'Could not connect to the server')
+            return render(request, 'accounts/login.html')
+    
     return render(request, 'accounts/login.html')
 
 
-
 def profile_page(request):
-    token = request.COOKIES.get('access_token')  # Or get from header
-
-    if not token:
-        return redirect('login_page')  # or return a 403 page
-
-    try:
-        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=["HS256"])
-        user = User.objects.get(id=payload['user_id'])
-    except (jwt.ExpiredSignatureError, jwt.DecodeError, User.DoesNotExist):
+    # Check if user has an access token
+    if 'access_token' not in request.session:
+        messages.error(request, 'Please login first')
         return redirect('login_page')
 
-    return render(request, 'accounts/profile.html', {'user': user})
+    try:
+        # Make authenticated request to API
+        headers = {
+            'Authorization': f'Bearer {request.session["access_token"]}',
+            'Content-Type': 'application/json'
+        }
+        
+        response = requests.get(
+            'http://localhost:8000/api/profile/',
+            headers=headers
+        )
+
+        if response.status_code == 200:
+            profile_data = response.json()
+            return render(request, 'accounts/profile.html', {'profile': profile_data})
+        
+        elif response.status_code == 401:  # Token expired
+            if refresh_access_token(request):  # Try to refresh token
+                return profile_page(request)  # Retry the request
+            messages.error(request, 'Session expired. Please login again')
+            return redirect('login_page')
+            
+        else:
+            messages.error(request, 'Failed to load profile')
+            return redirect('login_page')
+
+    except requests.exceptions.RequestException:
+        messages.error(request, 'Could not connect to the server')
+        return redirect('login_page')
+    
+def refresh_access_token(request):
+    """Helper function to refresh expired access token"""
+    if 'refresh_token' not in request.session:
+        return False
+        
+    try:
+        response = requests.post(
+            'http://localhost:8000/api/token/refresh/',
+            data={'refresh': request.session['refresh_token']},
+            headers={'Content-Type': 'application/json'}
+        )
+        
+        if response.status_code == 200:
+            request.session['access_token'] = response.json()['access']
+            return True
+    except requests.exceptions.RequestException:
+        pass
+        
+    return False
