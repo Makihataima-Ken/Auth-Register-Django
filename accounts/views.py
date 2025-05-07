@@ -54,6 +54,18 @@ class LoginView(APIView):
 
         return Response({'error': 'Invalid password'}, status=status.HTTP_401_UNAUTHORIZED)
     
+class LogoutView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        try:
+            refresh_token = request.data["refresh_token"]
+            token = RefreshToken(refresh_token)
+            token.blacklist()  # This requires SIMPLE_JWT config
+            return Response(status=status.HTTP_205_RESET_CONTENT)
+        except Exception as e:
+            return Response(status=status.HTTP_400_BAD_REQUEST)
+    
 class ProfileView(APIView):
     permission_classes = [IsAuthenticated]  # Require JWT toke
     def get(self, request):
@@ -132,6 +144,37 @@ def login_page(request):
     
     return render(request, 'accounts/login.html')
 
+# logout html view
+def logout_page(request):
+    if request.method == 'POST':
+        # Get the refresh token from session
+        refresh_token = request.session.get('refresh_token')
+        
+        if refresh_token:
+            try:
+                # Call API to blacklist token
+                response = requests.post(
+                    'http://localhost:8000/api/logout/',
+                    data={'refresh_token': refresh_token},
+                    headers={'Content-Type': 'application/json'}
+                )
+                
+                # Clear session regardless of API response
+                request.session.flush()
+                
+                if response.status_code == 205:
+                    print('Logged out successfully')
+                else:
+                    print('Logged out (token may still be valid)')
+                    
+            except requests.exceptions.RequestException:
+                request.session.flush()
+                print('Logged out (connection error)')
+        
+        return redirect('login_page')
+    
+    # If GET request, just show confirmation page
+    return render(request, 'accounts/logout.html')
 
 def profile_page(request):
     # Check if user has an access token
